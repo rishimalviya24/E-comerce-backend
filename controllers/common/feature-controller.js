@@ -1,29 +1,44 @@
 const Feature = require("../../models/Feature");
+const { imageUploadUtil } = require("../../helpers/cloudinary");
 
 const addFeatureImage = async (req, res) => {
   try {
-    const { image } = req.body;
+    // ✅ Check file existence
+    if (!req.file) {
+      return res.status(400).json({
+        success: false,
+        message: "No image file uploaded",
+      });
+    }
+    console.log("File received:", req.file.originalname);
 
-    console.log(image, "image");
+    // ✅ Convert file buffer to base64 for Cloudinary
+    const b64 = Buffer.from(req.file.buffer).toString("base64");
+    const dataURI = `data:${req.file.mimetype};base64,${b64}`;
 
-    const featureImages = new Feature({
-      image,
+    // ✅ Upload to Cloudinary
+    const result = await imageUploadUtil(dataURI);
+
+    // ✅ Save URL to DB
+    const featureImage = new Feature({
+      image: result.secure_url,
     });
 
-    await featureImages.save();
+    await featureImage.save();
 
     res.status(201).json({
       success: true,
-      data: featureImages,
+      data: featureImage,
     });
   } catch (e) {
-    console.log(e);
+    console.error("❌ Error in addFeatureImage:", e);
     res.status(500).json({
       success: false,
-      message: "Some error occured!",
+      message: "Some error occurred!",
     });
   }
 };
+
 
 const getFeatureImages = async (req, res) => {
   try {
