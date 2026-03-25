@@ -25,10 +25,12 @@ const allowedOriginsRaw = process.env.CORS_ORIGINS || "http://localhost:5173";
 const allowedOrigins = allowedOriginsRaw.split(",").map((o) => o.trim()).filter(Boolean);
 
 // Always include localhost variants for development
-const devOrigins = ["http://localhost:5173", "http://localhost:5174", "http://localhost:3000"];
+const devOrigins = ["http://localhost:5173", "http://localhost:5174", "http://localhost:3000","https://e-comerce-ok6v.onrender.com"];
 devOrigins.forEach((o) => {
   if (!allowedOrigins.includes(o)) allowedOrigins.push(o);
 });
+
+
 
 app.use(
   cors({
