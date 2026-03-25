@@ -1,8 +1,11 @@
-const paypal = require("../../helpers/paypal");
+const crypto = require("crypto");
+const razorpay = require("../../helpers/razorpay");
 const Order = require("../../models/Order");
 const Cart = require("../../models/Cart");
 const Product = require("../../models/Product");
 
+// ── CREATE ORDER ─────────────────────────────────────────────────────────────
+// Creates a Razorpay order and saves a pending DB order
 const createOrder = async (req, res) => {
   try {
     const {
@@ -15,195 +18,140 @@ const createOrder = async (req, res) => {
       totalAmount,
       orderDate,
       orderUpdateDate,
-      paymentId,
-      payerId,
       cartId,
     } = req.body;
 
-    const create_payment_json = {
-      intent: "sale",
-      payer: {
-        payment_method: "paypal",
-      },
-      redirect_urls: {
-        return_url:
-          "https://e-commerce-frontend-znmw.onrender.com/shop/paypal-return",
-        cancel_url:
-          "https://e-commerce-frontend-znmw.onrender.com/shop/paypal-cancel",
-      },
-      transactions: [
-        {
-          item_list: {
-            items: cartItems.map((item) => ({
-              name: item.title,
-              sku: item.productId,
-              price: item.price.toFixed(2),
-              currency: "USD",
-              quantity: item.quantity,
-            })),
-          },
-          amount: {
-            currency: "USD",
-            total: totalAmount.toFixed(2),
-          },
-          description: "description",
-        },
-      ],
-    };
+    // Razorpay amount is in paise (1 INR = 100 paise)
+    // totalAmount coming from frontend is in USD — we treat it as INR here
+    const amountInPaise = Math.round(parseFloat(totalAmount) * 100);
 
-    paypal.payment.create(create_payment_json, async (error, paymentInfo) => {
-      if (error) {
-        console.log(error);
+    const razorpayOrder = await razorpay.orders.create({
+      amount: amountInPaise,
+      currency: "INR",
+      receipt: `receipt_${Date.now()}`,
+      notes: { userId },
+    });
 
-        return res.status(500).json({
-          success: false,
-          message: "Error while creating paypal payment",
-        });
-      } else {
-        const newlyCreatedOrder = new Order({
-          userId,
-          cartId,
-          cartItems,
-          addressInfo,
-          orderStatus,
-          paymentMethod,
-          paymentStatus,
-          totalAmount,
-          orderDate,
-          orderUpdateDate,
-          paymentId,
-          payerId,
-        });
+    // Save pending order in DB
+    const newOrder = new Order({
+      userId,
+      cartId,
+      cartItems,
+      addressInfo,
+      orderStatus: "pending",
+      paymentMethod: "razorpay",
+      paymentStatus: "pending",
+      totalAmount,
+      orderDate,
+      orderUpdateDate,
+      paymentId: razorpayOrder.id, // store razorpay order id
+      payerId: "",
+    });
 
-        await newlyCreatedOrder.save();
+    await newOrder.save();
 
-        const approvalURL = paymentInfo.links.find(
-          (link) => link.rel === "approval_url"
-        ).href;
-
-        res.status(201).json({
-          success: true,
-          approvalURL,
-          orderId: newlyCreatedOrder._id,
-        });
-      }
+    res.status(201).json({
+      success: true,
+      razorpayOrderId: razorpayOrder.id,
+      orderId: newOrder._id,
+      amount: amountInPaise,
+      currency: "INR",
+      keyId: process.env.RAZORPAY_KEY_ID,
     });
   } catch (e) {
-    console.log(e);
-    res.status(500).json({
-      success: false,
-      message: "Some error occured!",
-    });
+    console.error("createOrder error:", e);
+    res.status(500).json({ success: false, message: "Could not create order" });
   }
 };
 
+// ── VERIFY & CAPTURE PAYMENT ─────────────────────────────────────────────────
+// Called after Razorpay payment popup is completed on the frontend
 const capturePayment = async (req, res) => {
   try {
-    const { paymentId, payerId, orderId } = req.body;
+    const {
+      razorpay_order_id,
+      razorpay_payment_id,
+      razorpay_signature,
+      orderId,
+    } = req.body;
 
-    let order = await Order.findById(orderId);
+    // 1. Verify signature
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+      .update(`${razorpay_order_id}|${razorpay_payment_id}`)
+      .digest("hex");
 
-    if (!order) {
-      return res.status(404).json({
+    if (expectedSignature !== razorpay_signature) {
+      return res.status(400).json({
         success: false,
-        message: "Order can not be found",
+        message: "Payment verification failed. Invalid signature.",
       });
+    }
+
+    // 2. Update order
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ success: false, message: "Order not found" });
     }
 
     order.paymentStatus = "paid";
     order.orderStatus = "confirmed";
-    order.paymentId = paymentId;
-    order.payerId = payerId;
+    order.paymentId = razorpay_payment_id;
+    order.payerId = razorpay_order_id;
 
-    for (let item of order.cartItems) {
-      let product = await Product.findById(item.productId);
-
+    // 3. Deduct stock
+    for (const item of order.cartItems) {
+      const product = await Product.findById(item.productId);
       if (!product) {
         return res.status(404).json({
           success: false,
-          message: `Not enough stock for this product ${product.title}`,
+          message: `Product not found: ${item.title}`,
         });
       }
-
       product.totalStock -= item.quantity;
-
       await product.save();
     }
 
-    const getCartId = order.cartId;
-    await Cart.findByIdAndDelete(getCartId);
-
+    // 4. Clear cart
+    await Cart.findByIdAndDelete(order.cartId);
     await order.save();
 
     res.status(200).json({
       success: true,
-      message: "Order confirmed",
+      message: "Payment verified and order confirmed!",
       data: order,
     });
   } catch (e) {
-    console.log(e);
-    res.status(500).json({
-      success: false,
-      message: "Some error occured!",
-    });
+    console.error("capturePayment error:", e);
+    res.status(500).json({ success: false, message: "Payment capture failed" });
   }
 };
 
+// ── GET ALL ORDERS BY USER ────────────────────────────────────────────────────
 const getAllOrdersByUser = async (req, res) => {
   try {
     const { userId } = req.params;
-
     const orders = await Order.find({ userId });
-
-    if (!orders.length) {
-      return res.status(404).json({
-        success: false,
-        message: "No orders found!",
-      });
-    }
-
-    res.status(200).json({
-      success: true,
-      data: orders,
-    });
+    res.status(200).json({ success: true, data: orders });
   } catch (e) {
-    console.log(e);
-    res.status(500).json({
-      success: false,
-      message: "Some error occured!",
-    });
+    console.error("getAllOrdersByUser error:", e);
+    res.status(500).json({ success: false, message: "Could not fetch orders" });
   }
 };
 
+// ── GET ORDER DETAILS ─────────────────────────────────────────────────────────
 const getOrderDetails = async (req, res) => {
   try {
     const { id } = req.params;
-
     const order = await Order.findById(id);
-
     if (!order) {
-      return res.status(404).json({
-        success: false,
-        message: "Order not found!",
-      });
+      return res.status(404).json({ success: false, message: "Order not found" });
     }
-
-    res.status(200).json({
-      success: true,
-      data: order,
-    });
+    res.status(200).json({ success: true, data: order });
   } catch (e) {
-    console.log(e);
-    res.status(500).json({
-      success: false,
-      message: "Some error occured!",
-    });
+    console.error("getOrderDetails error:", e);
+    res.status(500).json({ success: false, message: "Could not fetch order" });
   }
 };
 
-module.exports = {
-  createOrder,
-  capturePayment,
-  getAllOrdersByUser,
-  getOrderDetails,
-};
+module.exports = { createOrder, capturePayment, getAllOrdersByUser, getOrderDetails };

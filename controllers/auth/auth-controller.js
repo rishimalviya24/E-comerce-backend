@@ -1,20 +1,19 @@
-const bcrypt = require("bcrypt");
+const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const User = require("../../models/User");
 
-// =============================
-// ✅ REGISTER USER
-// =============================
+// REGISTER USER
 const registerUser = async (req, res) => {
   const { userName, email, password } = req.body;
+
+  if (!userName || !email || !password) {
+    return res.status(400).json({ success: false, message: "All fields are required" });
+  }
 
   try {
     const existingUser = await User.findOne({ email });
     if (existingUser) {
-      return res.json({
-        success: false,
-        message: "User already exists with this email!",
-      });
+      return res.status(400).json({ success: false, message: "User already exists with this email!" });
     }
 
     const hashedPassword = await bcrypt.hash(password, 12);
@@ -29,53 +28,36 @@ const registerUser = async (req, res) => {
 
     await newUser.save();
 
-    res.status(200).json({
-      success: true,
-      message: "Registration successful",
-    });
+    res.status(201).json({ success: true, message: "Registration successful" });
   } catch (error) {
-    console.error("❌ Registration Error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error during registration",
-    });
+    console.error("Registration Error:", error);
+    res.status(500).json({ success: false, message: "Server error during registration" });
   }
 };
 
-// =============================
-// ✅ LOGIN USER
-// =============================
+// LOGIN USER
 const loginUser = async (req, res) => {
   const { email, password } = req.body;
+
+  if (!email || !password) {
+    return res.status(400).json({ success: false, message: "Email and password are required" });
+  }
 
   try {
     const existingUser = await User.findOne({ email });
     if (!existingUser) {
-      return res.json({
-        success: false,
-        message: "User doesn't exist. Please register first.",
-      });
+      return res.status(401).json({ success: false, message: "User doesn't exist. Please register first." });
     }
 
-    const isPasswordCorrect = await bcrypt.compare(
-      password,
-      existingUser.password
-    );
+    const isPasswordCorrect = await bcrypt.compare(password, existingUser.password);
     if (!isPasswordCorrect) {
-      return res.json({
-        success: false,
-        message: "Incorrect password! Please try again.",
-      });
+      return res.status(401).json({ success: false, message: "Incorrect password! Please try again." });
     }
 
-    // ✅ Make sure JWT_SECRET is loaded correctly
-    const secret = (process.env.JWT_SECRET || "").trim();
+    const secret = process.env.JWT_SECRET;
     if (!secret) {
-      console.error("❌ JWT_SECRET is missing from environment!");
-      return res.status(500).json({
-        success: false,
-        message: "Server misconfiguration: JWT secret missing",
-      });
+      console.error("JWT_SECRET is missing from environment!");
+      return res.status(500).json({ success: false, message: "Server misconfiguration: JWT secret missing" });
     }
 
     const token = jwt.sign(
@@ -89,15 +71,13 @@ const loginUser = async (req, res) => {
       { expiresIn: "60m" }
     );
 
-    // ✅ Detect environment
-    const isDev = process.env.NODE_ENV !== "production";
+    const isProduction = process.env.NODE_ENV === "production";
 
-    // ✅ Set secure cookie
     res
       .cookie("token", token, {
         httpOnly: true,
-        secure: !isDev, // true in production (HTTPS)
-        sameSite: isDev ? "Lax" : "None",
+        secure: isProduction,
+        sameSite: isProduction ? "None" : "Lax",
         path: "/",
         maxAge: 3600000, // 1 hour
       })
@@ -112,67 +92,46 @@ const loginUser = async (req, res) => {
         },
       });
   } catch (error) {
-    console.error("❌ Login Error:", error);
-    res.status(500).json({
-      success: false,
-      message: "Server error during login",
-    });
+    console.error("Login Error:", error);
+    res.status(500).json({ success: false, message: "Server error during login" });
   }
 };
 
-// =============================
-// ✅ LOGOUT USER
-// =============================
+// LOGOUT USER
 const logoutUser = (req, res) => {
-  const isDev = process.env.NODE_ENV !== "production";
+  const isProduction = process.env.NODE_ENV === "production";
 
   res
     .clearCookie("token", {
       httpOnly: true,
-      secure: !isDev,
-      sameSite: isDev ? "Lax" : "None",
+      secure: isProduction,
+      sameSite: isProduction ? "None" : "Lax",
       path: "/",
     })
-    .json({
-      success: true,
-      message: "Logged out successfully!",
-    });
+    .json({ success: true, message: "Logged out successfully!" });
 };
 
-// =============================
-// ✅ AUTH MIDDLEWARE
-// =============================
+// AUTH MIDDLEWARE
 const authMiddleware = (req, res, next) => {
   const token = req.cookies.token;
 
   if (!token) {
-    return res.status(401).json({
-      success: false,
-      message: "Unauthorized: No token provided",
-    });
+    return res.status(401).json({ success: false, message: "Unauthorized: No token provided" });
   }
 
   try {
-    const secret = (process.env.JWT_SECRET || "").trim();
-
-    // ✅ Debug logs (remove in production)
-    console.log("🔍 Verifying token using secret =>", secret);
+    const secret = process.env.JWT_SECRET;
+    if (!secret) {
+      return res.status(500).json({ success: false, message: "Server misconfiguration" });
+    }
 
     const decoded = jwt.verify(token, secret);
     req.user = decoded;
     next();
   } catch (error) {
-    console.error("❌ Token Verification Error:", error.message);
-    return res.status(401).json({
-      success: false,
-      message: "Unauthorized: Invalid or expired token",
-    });
+    console.error("Token Verification Error:", error.message);
+    return res.status(401).json({ success: false, message: "Unauthorized: Invalid or expired token" });
   }
 };
 
-module.exports = {
-  registerUser,
-  loginUser,
-  logoutUser,
-  authMiddleware,
-};
+module.exports = { registerUser, loginUser, logoutUser, authMiddleware };
